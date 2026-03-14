@@ -27,19 +27,31 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024   # 500 MB max upload
 
 # ── Load model on Apple M4 MPS ─────────────────────────────────────────────
+# ── Auto-detect best available device ─────────────────────────────────────
+import torch
+if torch.backends.mps.is_available():
+    DEVICE = "mps"
+    DEV_NAME = "Apple MPS (GPU)"
+elif torch.cuda.is_available():
+    DEVICE = "cuda"
+    DEV_NAME = "NVIDIA CUDA (GPU)"
+else:
+    DEVICE = "cpu"
+    DEV_NAME = "CPU"
+
 print("\n" + "="*55)
 print("  VisionPro AI Engine")
 print("  Model  : YOLO11x (latest & most accurate)")
-print("  Device : Apple M4 — MPS (GPU accelerated)")
+print(f"  Device : {DEV_NAME}")
 print("="*55)
 
 model = YOLO("yolo11x.pt")       # Auto-downloads on first run (~109 MB)
-model.to("mps")                   # Use Apple M4 GPU via Metal Performance Shaders
+model.to(DEVICE)
 
 # Warm-up pass — eliminates slow first inference
 _dummy = np.zeros((640, 640, 3), dtype=np.uint8)
-model(_dummy, verbose=False, device="mps")
-print(f"\n  ✓ Ready! {len(model.names)} COCO classes | MPS accelerated\n")
+model(_dummy, verbose=False, device=DEVICE)
+print(f"\n  ✓ Ready! {len(model.names)} COCO classes | {DEV_NAME}\n")
 
 # ── Per-class deterministic colour ─────────────────────────────────────────
 _colours: dict = {}
@@ -112,7 +124,7 @@ def health():
     return jsonify({
         "status":  "ok",
         "model":   "yolo11x",
-        "device":  "mps",
+        "device":  DEVICE,
         "classes": len(model.names)
     })
 
@@ -136,7 +148,7 @@ def detect_image():
         if img is None:
             return jsonify({"error": "Cannot decode image. Check file format."}), 400
 
-        results = model(img, conf=conf, verbose=False, device="mps")
+        results = model(img, conf=conf, verbose=False, device=DEVICE)
         annotated, counts, det_list = draw(img.copy(), results, conf)
 
         return jsonify({
@@ -202,7 +214,7 @@ def detect_video():
                 persist=True,          # keep tracker state across frames
                 tracker="bytetrack.yaml",
                 verbose=False,
-                device="mps"
+                device=DEVICE
             )
 
             ann, _, _ = draw(frame.copy(), results, conf)
@@ -312,7 +324,7 @@ def _mjpeg():
             if not ret:
                 break
 
-            results = model(frame, conf=_stream_conf, verbose=False, device="mps")
+            results = model(frame, conf=_stream_conf, verbose=False, device=DEVICE)
             ann, counts, _ = draw(frame.copy(), results, _stream_conf)
             _frame_counts.clear()
             _frame_counts.update(counts)
