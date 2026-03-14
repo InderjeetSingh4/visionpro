@@ -1,3 +1,4 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
 fastapi==0.129.0
 uvicorn==0.40.0
 Flask
@@ -5,8 +6,8 @@ flask-cors==6.0.2
 gunicorn==23.0.0
 python-multipart==0.0.22
 ultralytics==8.4.21
-torch==2.10.0
-torchvision==0.25.0
+torch
+torchvision
 opencv-python-headless==4.13.0.92
 numpy
 pillow
