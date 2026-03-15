@@ -875,7 +875,7 @@ function ProfilePanel({ user, onClose, onLogout }) {
         redirectTo: window.location.origin + "/#type=recovery"
       });
       if(error) setMsg({text: error.message, ok:false});
-      else       setScreen("sent");
+      else      setScreen("sent");
     } catch(e) {
       setMsg({text: e.message||"Error sending email", ok:false});
     }
@@ -1911,7 +1911,7 @@ function PhoneCameraPage() {
   const [camFace,  setCamFace]  = useState("environment"); // rear cam default
   const streamRef2 = useRef(null);
 
-  const API_URL = window.location.origin.replace(":5173","") + ":5001";
+  const API_URL = API;
 
   const startCam = async (facingMode="environment") => {
     setErr("");
@@ -2143,51 +2143,14 @@ function useQRCanvas(text, size=220) {
 function QRModal({ onClose }) {
   const [closing,  setClosing]  = useState(false);
   const [copied,   setCopied]   = useState(false);
-  const [phoneUrl, setPhoneUrl] = useState(""); // resolved URL for QR
-  const [status,   setStatus]   = useState("loading"); // loading | ready | error
+  const [phoneUrl, setPhoneUrl] = useState("");
+  const [status,   setStatus]   = useState("loading");
 
   const qrRef = useQRCanvas(phoneUrl, 200);
 
-  // Resolve URL: try tunnel first, show local IP immediately as fallback
   useEffect(()=>{
-    let cancelled = false;
-
-    const resolve = async () => {
-      // Always fetch local IP first so QR shows immediately
-      let localUrl = "";
-      try {
-        const r = await fetch(`${API}/api/local-ip`, {signal: AbortSignal.timeout(3000)});
-        const d = await r.json();
-        if(d.ip && d.ip !== "127.0.0.1" && d.ip !== "localhost") {
-          localUrl = `http://${d.ip}:5173/phone`;
-          if(!cancelled) { setPhoneUrl(localUrl); setStatus("local"); }
-        }
-      } catch(_) {}
-
-      // Then check if tunnel is available (may take a few seconds to start)
-      let attempts = 0;
-      const checkTunnel = async () => {
-        if(cancelled) return;
-        try {
-          const r = await fetch(`${API}/api/tunnel-url`, {signal: AbortSignal.timeout(3000)});
-          const d = await r.json();
-          if(!cancelled && d.url && d.has_tunnel) {
-            setPhoneUrl(`${d.url}/phone`);
-            setStatus("tunnel");
-            return; // done
-          }
-        } catch(_) {}
-        // Retry up to 6 times (30 seconds total) — tunnel may still be starting
-        attempts++;
-        if(attempts < 6 && !cancelled) setTimeout(checkTunnel, 5000);
-      };
-      checkTunnel();
-
-      if(!localUrl && !cancelled) setStatus("error");
-    };
-
-    resolve();
-    return () => { cancelled = true; };
+    setPhoneUrl(window.location.origin + "/phone");
+    setStatus("tunnel");
   }, []);
 
   const close = () => { setClosing(true); setTimeout(onClose, 180); };
@@ -2209,11 +2172,6 @@ function QRModal({ onClose }) {
         {status==="tunnel" && (
           <div className="qr-badge"><div className="qr-badge-dot"/>Internet tunnel active — works anywhere</div>
         )}
-        {status==="local" && (
-          <div className="qr-badge" style={{background:"#eef5fd",color:"#0071e3",borderColor:"#bfdbfe"}}>
-            <div className="qr-badge-dot" style={{background:"#0071e3"}}/>Local network · checking for internet tunnel…
-          </div>
-        )}
 
         {/* QR canvas */}
         <div className="qr-canvas-wrap">
@@ -2223,15 +2181,7 @@ function QRModal({ onClose }) {
               <div className="qr-status-txt">Generating QR…</div>
             </div>
           )}
-          {status==="error" && (
-            <div className="qr-status">
-              <div style={{fontSize:"1.5rem"}}>⚠️</div>
-              <div className="qr-status-txt" style={{color:"#d93025",textAlign:"center",lineHeight:1.5}}>
-                Could not detect URL.<br/>Start backend first.
-              </div>
-            </div>
-          )}
-          {(status==="tunnel"||status==="local") && (
+          {status==="tunnel" && (
             <div ref={qrRef} style={{lineHeight:0,borderRadius:8,overflow:"hidden"}}/>
           )}
         </div>
