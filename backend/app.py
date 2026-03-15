@@ -27,7 +27,6 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024   # 500 MB max upload
 
 # ── Load model on Apple M4 MPS ─────────────────────────────────────────────
-# ── Auto-detect best available device ─────────────────────────────────────
 import torch
 if torch.backends.mps.is_available():
     DEVICE = "mps"
@@ -100,11 +99,9 @@ def draw(frame: np.ndarray, results, conf_thresh: float):
 
     return frame, counts, det_list
 
-# ── Helper: encode frame → base64 JPEG string ─────────────────────────────
 def to_b64(frame: np.ndarray, quality: int = 92) -> str:
     _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
     return "data:image/jpeg;base64," + base64.b64encode(buf).decode()
-
 
 # ────────────────────────────────────────────────────────────────────────────
 #  API ROUTES
@@ -112,31 +109,17 @@ def to_b64(frame: np.ndarray, quality: int = 92) -> str:
 
 @app.route("/")
 def root():
-    return jsonify({
-        "status":  "VisionPro running",
-        "model":   "yolo11s",
-        "device":  "mps (Apple M4)",
-        "classes": len(model.names)
-    })
+    return jsonify({"status": "VisionPro running", "model": "yolo11s", "classes": len(model.names)})
 
 @app.route("/health")
 def health():
-    return jsonify({
-        "status":  "ok",
-        "model":   "yolo11s",
-        "device":  DEVICE,
-        "classes": len(model.names)
-    })
+    return jsonify({"status": "ok", "model": "yolo11s", "device": DEVICE, "classes": len(model.names)})
 
 
-# ── 1. IMAGE detection ────────────────────────────────────────────────────
 @app.route("/api/detect/image", methods=["POST", "OPTIONS"])
 def detect_image():
-    if request.method == "OPTIONS":
-        return jsonify({}), 200
-
-    if "file" not in request.files:
-        return jsonify({"error": "No file provided"}), 400
+    if request.method == "OPTIONS": return jsonify({}), 200
+    if "file" not in request.files: return jsonify({"error": "No file provided"}), 400
 
     f    = request.files["file"]
     conf = float(request.form.get("confidence", 0.30))
@@ -145,8 +128,7 @@ def detect_image():
     try:
         buf = np.frombuffer(f.read(), np.uint8)
         img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-        if img is None:
-            return jsonify({"error": "Cannot decode image. Check file format."}), 400
+        if img is None: return jsonify({"error": "Cannot decode image"}), 400
 
         results = model(img, conf=conf, verbose=False, device=DEVICE)
         annotated, counts, det_list = draw(img.copy(), results, conf)
@@ -158,13 +140,11 @@ def detect_image():
             "total":      sum(counts.values()),
             "latency_ms": int((time.time() - t0) * 1000),
         })
-
     except Exception as e:
-        print(f"[IMAGE ERROR] {e}")
         return jsonify({"error": str(e)}), 500
 
 
-# ── 2. VIDEO detection ────────────────────────────────────────────────────
+# ── 2. VIDEO detection (OPTIMIZED FOR SPEED) ──────────────────────────────
 @app.route("/api/detect/video", methods=["POST", "OPTIONS"])
 def detect_video():
     if request.method == "OPTIONS":
@@ -185,11 +165,15 @@ def detect_video():
 
     cap = cv2.VideoCapture(in_path)
     if not cap.isOpened():
-        return jsonify({"error": "Cannot open video. Is the format supported?"}), 400
+        return jsonify({"error": "Cannot open video"}), 400
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-    W   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    H   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    # OPTIMIZATION 1: Force resize to 640px width to save CPU
+    orig_W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    orig_H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    W = 640
+    H = int(640 * (orig_H / orig_W))
 
     writer = cv2.VideoWriter(
         raw_path,
@@ -197,8 +181,8 @@ def detect_video():
         fps, (W, H)
     )
 
-    unique_ids: dict  = {}   # track_id → class label (each real object counted once)
-    all_counts: dict  = {}   # unique count per class
+    unique_ids: dict  = {}   
+    all_counts: dict  = {}   
     n_frames = 0
 
     try:
@@ -206,12 +190,21 @@ def detect_video():
             ret, frame = cap.read()
             if not ret:
                 break
+                
+            n_frames += 1
+            
+            # Apply Resize
+            frame = cv2.resize(frame, (W, H))
 
-            # Use track() instead of __call__() — enables ByteTrack
+            # OPTIMIZATION 2: Skip 2 out of every 3 frames (300% Speed Boost)
+            if n_frames % 3 != 0:
+                writer.write(frame)
+                continue
+
             results = model.track(
                 frame,
                 conf=conf,
-                persist=True,          # keep tracker state across frames
+                persist=True,          
                 tracker="bytetrack.yaml",
                 verbose=False,
                 device=DEVICE
@@ -219,7 +212,6 @@ def detect_video():
 
             ann, _, _ = draw(frame.copy(), results, conf)
 
-            # Count each track_id only ONCE across the whole video
             for r in results:
                 if r.boxes.id is None:
                     continue
@@ -231,28 +223,20 @@ def detect_video():
                         all_counts[label] = all_counts.get(label, 0) + 1
 
             writer.write(ann)
-            n_frames += 1
+            
     finally:
         cap.release()
         writer.release()
 
-    # Re-encode to H.264 so every browser can play it
+    # Re-encode to H.264
     ffmpeg_ok = (
-        os.system(
-            f'ffmpeg -y -i "{raw_path}" '
-            f'-vcodec libx264 -preset fast -crf 22 '
-            f'-movflags +faststart "{out_path}" -loglevel error'
-        ) == 0
+        os.system(f'ffmpeg -y -i "{raw_path}" -vcodec libx264 -preset ultrafast -crf 28 -movflags +faststart "{out_path}" -loglevel error') == 0
         and os.path.exists(out_path)
-        and os.path.getsize(out_path) > 0
     )
     serve = out_path if ffmpeg_ok else raw_path
 
-    # Serve via URL (faster, more reliable than base64 for large videos)
-    serve_name = os.path.basename(serve)
-
     return jsonify({
-        "video":        f"/api/video/{serve_name}",
+        "video":        f"/api/video/{os.path.basename(serve)}",
         "video_url":    True,
         "detections":   all_counts,
         "total":        sum(all_counts.values()),
@@ -261,7 +245,6 @@ def detect_video():
         "fps":          round(fps, 2),
         "latency_ms":   int((time.time() - t0) * 1000),
     })
-
 
 @app.route("/api/local-ip")
 def local_ip():
@@ -275,23 +258,17 @@ def local_ip():
         ip = "localhost"
     return jsonify({"ip": ip})
 
-
-# ── Ngrok public tunnel URL (set at startup) ──────────────────────────────
 _ngrok_url: str = ""
 
 @app.route("/api/tunnel-url")
 def tunnel_url():
-    """Return the ngrok public URL so frontend can build QR code."""
     return jsonify({"url": _ngrok_url, "has_tunnel": bool(_ngrok_url)})
 
-
-# ── Serve processed video files ───────────────────────────────────────────
 @app.route("/api/video/<filename>")
 def serve_video(filename):
     from flask import send_file
     path = os.path.join(OUTPUT_DIR, secure_filename(filename))
-    if not os.path.exists(path):
-        return jsonify({"error": "Video not found"}), 404
+    if not os.path.exists(path): return jsonify({"error": "Video not found"}), 404
     return send_file(path, mimetype="video/mp4", conditional=True)
 
 
@@ -299,42 +276,35 @@ def serve_video(filename):
 _streaming     = False
 _stream_lock   = threading.Lock()
 _stream_conf   = 0.30
-_frame_counts  = {}    # current frame counts
-_frame_history = []    # last 20 frames
-_confirmed_objects = {}  # objects confirmed across stream (class → max count seen consistently)
+_frame_counts  = {}
+_frame_history = []
+_confirmed_objects = {}
 
 def _mjpeg():
     global _streaming, _stream_conf
 
-    cap = cv2.VideoCapture(0)   # 0 = built-in MacBook webcam
-    if not cap.isOpened():
-        print("[STREAM] No webcam found.")
-        return
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened(): return
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     cap.set(cv2.CAP_PROP_FPS, 30)
 
-    with _stream_lock:
-        _streaming = True
+    with _stream_lock: _streaming = True
 
     try:
         while _streaming:
             ret, frame = cap.read()
-            if not ret:
-                break
+            if not ret: break
 
             results = model(frame, conf=_stream_conf, verbose=False, device=DEVICE)
             ann, counts, _ = draw(frame.copy(), results, _stream_conf)
             _frame_counts.clear()
             _frame_counts.update(counts)
 
-            # Rolling history
             _frame_history.append(dict(counts))
-            if len(_frame_history) > 20:
-                _frame_history.pop(0)
+            if len(_frame_history) > 20: _frame_history.pop(0)
 
-            # Confirm objects seen in 60% of last 8 frames → add to session total
             if len(_frame_history) >= 5:
                 recent = _frame_history[-8:]
                 threshold = len(recent) * 0.6
@@ -346,133 +316,80 @@ def _mjpeg():
                             _confirmed_objects[cls] = max_count
 
             total = sum(counts.values())
+            cv2.putText(ann, f"LIVE  |  {total} objects", (14, 36), cv2.FONT_HERSHEY_DUPLEX, 0.85, (255, 255, 255), 2, cv2.LINE_AA)
 
-            # HUD overlay
-            cv2.putText(ann, f"LIVE  |  {total} objects",
-                        (14, 36), cv2.FONT_HERSHEY_DUPLEX,
-                        0.85, (255, 255, 255), 2, cv2.LINE_AA)
-
-            _, buf = cv2.imencode(".jpg", ann, [cv2.IMWRITE_JPEG_QUALITY, 75])
-            yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n\r\n"
-                + buf.tobytes()
-                + b"\r\n"
-            )
+            _, buf = cv2.imencode(".jpg", ann, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n")
     finally:
         cap.release()
-        with _stream_lock:
-            _streaming = False
+        with _stream_lock: _streaming = False
 
 @app.route("/api/stream/webcam")
 def webcam_stream():
     global _stream_conf, _frame_counts, _frame_history, _confirmed_objects
     _stream_conf = float(request.args.get("confidence", 0.30))
-    # Reset all tracking state for new stream
     _frame_counts.clear()
     _frame_history.clear()
     _confirmed_objects.clear()
-    return Response(
-        stream_with_context(_mjpeg()),
-        mimetype="multipart/x-mixed-replace; boundary=frame"
-    )
+    return Response(stream_with_context(_mjpeg()), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 @app.route("/api/stream/counts")
 def stream_counts():
-    # Return everything confirmed during the entire stream
     return jsonify({"counts": dict(_confirmed_objects)})
-
 
 @app.route("/api/stream/stop", methods=["POST", "OPTIONS"])
 def stream_stop():
-    global _streaming, _frame_counts, _frame_history
-    if request.method == "OPTIONS":
-        return jsonify({}), 200
-    with _stream_lock:
-        _streaming = False
+    global _streaming
+    if request.method == "OPTIONS": return jsonify({}), 200
+    with _stream_lock: _streaming = False
     return jsonify({"status": "stopped"})
 
 
-# ── Run ────────────────────────────────────────────────────────────────────
 def _start_tunnel(port: int):
-    """
-    Start a free public tunnel — no account or auth needed.
-    Tries in order: Cloudflare Quick Tunnel → localhost.run (SSH) → local IP fallback.
-    """
     global _ngrok_url
     import subprocess, threading, time as _time, re
 
-    # ── Option 1: Cloudflare Quick Tunnel (cloudflared) ──────────────────────
-    # Free, no account, no auth. Install: brew install cloudflared
     def try_cloudflare():
         global _ngrok_url
         try:
-            proc = subprocess.Popen(
-                ["cloudflared", "tunnel", "--url", f"http://localhost:{port}"],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True
-            )
+            proc = subprocess.Popen(["cloudflared", "tunnel", "--url", f"http://localhost:{port}"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             deadline = _time.time() + 15
             for line in proc.stdout:
-                if _time.time() > deadline:
-                    break
+                if _time.time() > deadline: break
                 m = re.search(r"https://[\w\-]+\.trycloudflare\.com", line)
                 if m:
                     _ngrok_url = m.group(0)
-                    print(f"  🌐 Cloudflare tunnel : {_ngrok_url}")
                     return True
-        except FileNotFoundError:
-            pass
-        except Exception:
-            pass
+        except: pass
         return False
 
-    # ── Option 2: localhost.run (SSH — built into macOS, no install needed) ──
     def try_localhostrun():
         global _ngrok_url
         try:
-            proc = subprocess.Popen(
-                ["ssh", "-o", "StrictHostKeyChecking=no",
-                 "-o", "ServerAliveInterval=30",
-                 "-R", f"80:localhost:{port}",
-                 "nokey@localhost.run"],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True
-            )
+            proc = subprocess.Popen(["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ServerAliveInterval=30", "-R", f"80:localhost:{port}", "nokey@localhost.run"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             deadline = _time.time() + 12
             for line in proc.stdout:
-                if _time.time() > deadline:
-                    break
+                if _time.time() > deadline: break
                 m = re.search(r"https://[\w\-]+\.lhr\.life", line)
-                if not m:
-                    m = re.search(r"https://[\w\-\.]+\.localhost\.run", line)
+                if not m: m = re.search(r"https://[\w\-\.]+\.localhost\.run", line)
                 if m:
                     _ngrok_url = m.group(0)
-                    print(f"  🌐 localhost.run tunnel : {_ngrok_url}")
                     return True
-        except Exception:
-            pass
+        except: pass
         return False
 
-    # Run tunnel attempts in background so server starts immediately
     def tunnel_worker():
-        if try_cloudflare():
-            return
-        if try_localhostrun():
-            return
-        print("  ℹ  No tunnel found. QR uses local IP — phone needs same WiFi.")
-        print("     For internet QR: brew install cloudflared")
+        if try_cloudflare(): return
+        if try_localhostrun(): return
 
     t = threading.Thread(target=tunnel_worker, daemon=True)
     t.start()
-    # Wait up to 8s for tunnel before continuing server start
     t.join(timeout=8)
 
 
 if __name__ == "__main__":
     import socket
     port = int(os.environ.get("PORT", 5001))
-    # Get local network IP
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -481,7 +398,6 @@ if __name__ == "__main__":
     except Exception:
         local_ip = "localhost"
 
-    # Start free public tunnel (no account needed)
     _start_tunnel(port)
 
     print(f"\n{'='*55}")
