@@ -1,6 +1,6 @@
 """
 VisionPro AI Engine
-Model  : YOLO11x (highest accuracy, latest Ultralytics model)
+Model  : YOLO11s (Optimized for speed and accuracy)
 Device : Apple M4 MPS (Metal Performance Shaders) — GPU accelerated
 Modes  : Image detection | Video detection | Live webcam stream
 """
@@ -41,11 +41,11 @@ else:
 
 print("\n" + "="*55)
 print("  VisionPro AI Engine")
-print("  Model  : YOLO11x (latest & most accurate)")
+print("  Model  : YOLO11s (optimized for speed & accuracy)")
 print(f"  Device : {DEV_NAME}")
 print("="*55)
 
-model = YOLO("yolo11x.pt")       # Auto-downloads on first run (~109 MB)
+model = YOLO("yolo11s.pt")       # Auto-downloads on first run
 model.to(DEVICE)
 
 # Warm-up pass — eliminates slow first inference
@@ -114,7 +114,7 @@ def to_b64(frame: np.ndarray, quality: int = 92) -> str:
 def root():
     return jsonify({
         "status":  "VisionPro running",
-        "model":   "yolo11x",
+        "model":   "yolo11s",
         "device":  "mps (Apple M4)",
         "classes": len(model.names)
     })
@@ -123,7 +123,7 @@ def root():
 def health():
     return jsonify({
         "status":  "ok",
-        "model":   "yolo11x",
+        "model":   "yolo11s",
         "device":  DEVICE,
         "classes": len(model.names)
     })
