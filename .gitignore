@@ -1,1 +1,5 @@
 backend/yolo11x.pt
+*.pt
+outputs/
+venv/
+__pycache__/

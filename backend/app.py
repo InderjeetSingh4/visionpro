@@ -34,18 +34,30 @@ else:
     DEVICE = "cpu"
     DEV_NAME = "CPU"
 
+# Auto-select model based on hardware:
+# GPU → yolo11x (most accurate), CPU → yolo11n (40x faster, good accuracy)
+if DEVICE in ("mps", "cuda"):
+    MODEL_NAME = "yolo11x.pt"
+    MODEL_LABEL = "YOLO11x (GPU — max accuracy)"
+else:
+    MODEL_NAME = "yolo11n.pt"
+    MODEL_LABEL = "YOLO11n (CPU — optimised for speed)"
+
 print("\n" + "="*55)
 print("  VisionPro AI Engine")
-print("  Model  : YOLO11m")
+print(f"  Model  : {MODEL_LABEL}")
 print(f"  Device : {DEV_NAME}")
 print("="*55)
 
-model = YOLO("yolo11m.pt")
+model = YOLO(MODEL_NAME)
 model.to(DEVICE)
 
+# Use smaller inference size on CPU for much faster processing
+INFER_SIZE = 640 if DEVICE in ("mps", "cuda") else 416
+
 _dummy = np.zeros((640, 640, 3), dtype=np.uint8)
-model(_dummy, verbose=False, device=DEVICE)
-print(f"\n  ✓ Ready! {DEV_NAME}\n")
+model(_dummy, verbose=False, device=DEVICE, imgsz=INFER_SIZE)
+print(f"\n  ✓ Ready! {MODEL_LABEL} | {DEV_NAME}\n")
 
 # A professional, muted, desaturated color palette (BGR format for OpenCV)
 PREMIUM_PALETTE = [
@@ -140,12 +152,11 @@ def detect_image():
     img = cv2.imdecode(np.frombuffer(f.read(), np.uint8), cv2.IMREAD_COLOR)
     h, w = img.shape[:2]
 
-    # Run detection at multiple scales and merge — catches small + large objects
-    all_boxes = []
-    all_scores = []
-    all_classes = []
+    # GPU: two scales for max accuracy | CPU: single pass for speed
+    all_boxes, all_scores, all_classes = [], [], []
+    sizes = [INFER_SIZE, min(INFER_SIZE*2, 1280)] if DEVICE in ("mps","cuda") else [INFER_SIZE]
 
-    for imgsz in [640, 1280]:
+    for imgsz in sizes:
         res = model(img, conf=conf, verbose=False, device=DEVICE,
                     imgsz=imgsz, iou=0.4, augment=False)
         for r in res:
@@ -228,39 +239,70 @@ def detect_video():
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     W   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     H   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    # On CPU: process every 4th frame at 320px — ~10x faster than GPU mode
+    # On GPU: process every frame at full resolution
+    is_cpu = DEVICE == "cpu"
+    SKIP   = 4   if is_cpu else 1    # process every Nth frame
+    MAX_W  = 480 if is_cpu else W    # resize width on CPU
+    ISIZE  = 320 if is_cpu else 640  # inference size
+
+    # Resize if needed
+    if W > MAX_W:
+        scale = MAX_W / W
+        PW, PH = int(W * scale), int(H * scale)
+        PW = PW - (PW % 2)  # must be even for video writer
+        PH = PH - (PH % 2)
+    else:
+        PW, PH = W, H
+
     # Reset tracker state so IDs start fresh for each video
     model.reset_callbacks()
     if hasattr(model, 'predictor') and model.predictor is not None:
         model.predictor = None
 
-    writer = cv2.VideoWriter(raw_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (W, H))
+    writer = cv2.VideoWriter(raw_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (PW, PH))
     unique_ids, all_counts, n_frames = {}, {}, 0
+    last_ann = None  # reuse for skipped frames
+    # On CPU cap at 300 frames (~10s at 30fps) to prevent timeout
+    MAX_FRAMES = 300 if is_cpu else 99999
 
     try:
+        frame_idx = 0
         while True:
             ret, frame = cap.read()
             if not ret: break
+            if n_frames >= MAX_FRAMES: break  # CPU safety cap
             n_frames += 1
-            results = model.track(
-                frame, conf=conf, iou=0.35, persist=True,
-                tracker="bytetrack.yaml", verbose=False, device=DEVICE,
-                agnostic_nms=False
-            )
-            ann, _, _ = draw(frame.copy(), results, conf)
-            for r in results:
-                if r.boxes.id is None: continue
-                for box, tid in zip(r.boxes, r.boxes.id.int().tolist()):
-                    if tid not in unique_ids:
-                        label = model.names[int(box.cls[0])]
-                        unique_ids[tid] = label
-                        all_counts[label] = all_counts.get(label, 0) + 1
-            writer.write(ann)
+            frame_idx += 1
+
+            # Resize frame if needed
+            if PW != W or PH != H:
+                frame = cv2.resize(frame, (PW, PH))
+
+            if frame_idx % SKIP == 0 or last_ann is None:
+                results = model.track(
+                    frame, conf=conf, iou=0.35, persist=True,
+                    tracker="bytetrack.yaml", verbose=False, device=DEVICE,
+                    imgsz=ISIZE
+                )
+                last_ann, _, _ = draw(frame.copy(), results, conf)
+                for r in results:
+                    if r.boxes.id is None: continue
+                    for box, tid in zip(r.boxes, r.boxes.id.int().tolist()):
+                        if tid not in unique_ids:
+                            label = model.names[int(box.cls[0])]
+                            unique_ids[tid] = label
+                            all_counts[label] = all_counts.get(label, 0) + 1
+            writer.write(last_ann)
     finally:
         cap.release()
         writer.release()
 
+    # ultrafast preset on CPU for speed, fast on GPU for quality
+    preset = "ultrafast" if is_cpu else "fast"
     os.system(
-        f'ffmpeg -y -i "{raw_path}" -vcodec libx264 -preset fast -crf 22 '
+        f'ffmpeg -y -i "{raw_path}" -vcodec libx264 -preset {preset} -crf 24 '
         f'-movflags +faststart "{out_path}" -loglevel error'
     )
     serve = out_path if os.path.exists(out_path) and os.path.getsize(out_path) > 0 else raw_path
@@ -392,7 +434,7 @@ def _mjpeg():
     frame_idx    = 0
     last_boxes   = []   # list of (x1,y1,x2,y2,label,conf,color) — persist across frames
     last_counts  = {}
-    SKIP         = 2    # run YOLO every Nth frame
+    SKIP         = 3 if DEVICE == "cpu" else 2  # skip more frames on CPU
 
     try:
         while _streaming:
@@ -401,7 +443,7 @@ def _mjpeg():
 
             if frame_idx % SKIP == 0:
                 # Run YOLO on this frame
-                results = model(frame, conf=_stream_conf, imgsz=480,
+                results = model(frame, conf=_stream_conf, imgsz=INFER_SIZE,
                                 verbose=False, device=DEVICE,
                                 iou=0.35)
                 # Extract boxes for persistent overlay
