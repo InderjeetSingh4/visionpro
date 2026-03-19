@@ -431,10 +431,11 @@ def _mjpeg():
         _frame_history.clear()
         _confirmed_objects.clear()
 
-    frame_idx    = 0
-    last_boxes   = []   # list of (x1,y1,x2,y2,label,conf,color) — persist across frames
-    last_counts  = {}
-    SKIP         = 3 if DEVICE == "cpu" else 2  # skip more frames on CPU
+    frame_idx   = 0
+    last_boxes  = []
+    last_counts = {}
+    SKIP        = 2   # run YOLO every 2nd frame only
+    font        = cv2.FONT_HERSHEY_SIMPLEX
 
     try:
         while _streaming:
@@ -442,80 +443,68 @@ def _mjpeg():
             if not ret: break
 
             if frame_idx % SKIP == 0:
-                # Run YOLO on this frame
-                results = model(frame, conf=_stream_conf, imgsz=INFER_SIZE,
-                                verbose=False, device=DEVICE,
-                                iou=0.35)
-                # Extract boxes for persistent overlay
+                results = model(frame, conf=_stream_conf, imgsz=416,
+                                verbose=False, device=DEVICE, iou=0.4)
                 last_boxes  = []
                 last_counts = {}
                 h, w = frame.shape[:2]
-                font_scale = max(0.38, w / 2800)
-                txt_thick  = max(1, int(w / 1800))
-                box_thick  = max(2, int(w / 700))
+                fs  = max(0.38, w / 2800)
+                tt  = max(1, int(w / 1800))
+                bt  = max(2, int(w / 700))
 
                 for r in results:
-                    boxes   = r.boxes
-                    has_ids = boxes.id is not None
-                    for i, box in enumerate(boxes):
+                    for box in r.boxes:
                         conf = float(box.conf[0])
                         if conf < _stream_conf: continue
                         cid   = int(box.cls[0])
                         label = model.names[cid].capitalize()
                         color = get_colour(cid)
                         x1,y1,x2,y2 = map(int, box.xyxy[0].tolist())
-                        tid   = int(boxes.id[i]) if has_ids else None
-                        last_boxes.append((x1,y1,x2,y2,label,conf,color,tid,
-                                           font_scale, txt_thick, box_thick))
+                        last_boxes.append((x1,y1,x2,y2,label,conf,color,fs,tt,bt))
                         last_counts[label] = last_counts.get(label, 0) + 1
 
                 _frame_counts.clear()
                 _frame_counts.update(last_counts)
-
-                # Confirmed objects tracking
                 _frame_history.append(dict(last_counts))
                 if len(_frame_history) > 20: _frame_history.pop(0)
                 if len(_frame_history) >= 5:
                     recent = _frame_history[-8:]
                     threshold = len(recent) * 0.6
                     for cls in set(c for f in recent for c in f):
-                        seen = sum(1 for f in recent if f.get(cls, 0) > 0)
-                        if seen >= threshold:
-                            mx = max(f.get(cls, 0) for f in recent)
-                            _confirmed_objects[cls] = mx
+                        if sum(1 for f in recent if f.get(cls,0)>0) >= threshold:
+                            _confirmed_objects[cls] = max(f.get(cls,0) for f in recent)
 
-            # ── Always draw stored boxes on CURRENT frame (no blink!) ──────
+            # Draw boxes directly on frame copy — NO addWeighted per box
             display = frame.copy()
-            font = cv2.FONT_HERSHEY_SIMPLEX
 
-            for (x1,y1,x2,y2,label,conf,color,tid,fs,tt,bt) in last_boxes:
-                # Corner-bracket box
-                draw_corner_box(display, x1, y1, x2, y2, color, bt)
+            for (x1,y1,x2,y2,label,conf,color,fs,tt,bt) in last_boxes:
+                # Simple corner brackets — no overlay blending
+                c = max(10, min(25, int(min(x2-x1,y2-y1)*0.20)))
+                cv2.line(display,(x1,y1),(x1+c,y1),color,bt,cv2.LINE_AA)
+                cv2.line(display,(x1,y1),(x1,y1+c),color,bt,cv2.LINE_AA)
+                cv2.line(display,(x2,y1),(x2-c,y1),color,bt,cv2.LINE_AA)
+                cv2.line(display,(x2,y1),(x2,y1+c),color,bt,cv2.LINE_AA)
+                cv2.line(display,(x1,y2),(x1+c,y2),color,bt,cv2.LINE_AA)
+                cv2.line(display,(x1,y2),(x1,y2-c),color,bt,cv2.LINE_AA)
+                cv2.line(display,(x2,y2),(x2-c,y2),color,bt,cv2.LINE_AA)
+                cv2.line(display,(x2,y2),(x2,y2-c),color,bt,cv2.LINE_AA)
+                # Simple dark label — no addWeighted
+                txt = f"{label} {conf*100:.0f}%"
+                (tw2,th2),_ = cv2.getTextSize(txt,font,fs,tt)
+                ly = max(th2+6, y1-4)
+                cv2.rectangle(display,(x1,ly-th2-6),(x1+tw2+8,ly+2),(20,20,24),-1)
+                cv2.putText(display,txt,(x1+4,ly-2),font,fs,(240,240,240),tt,cv2.LINE_AA)
 
-                # Label pill
-                txt = f"{label}  {conf*100:.0f}%" if tid is None else f"#{tid} {label}  {conf*100:.0f}%"
-                (tw2, th2), _ = cv2.getTextSize(txt, font, fs, tt)
-                pad2 = 5
-                lx1  = x1
-                ly1  = max(0, y1 - th2 - pad2*2 - 2)
-                ly2  = max(th2 + pad2*2, y1)
+            # Simple HUD — single dark rectangle, no addWeighted
+            total = sum(last_counts.values())
+            hud = f"LIVE  {total} obj"
+            (hw,hh),_ = cv2.getTextSize(hud,font,0.52,1)
+            cv2.rectangle(display,(10,10),(hw+22,hh+20),(18,18,22),-1)
+            cv2.circle(display,(20,10+hh//2+5),4,(60,60,220),-1,cv2.LINE_AA)
+            cv2.putText(display,hud,(28,hh+14),font,0.52,(240,240,240),1,cv2.LINE_AA)
 
-                pill = display.copy()
-                cv2.rectangle(pill, (lx1, ly1), (lx1+tw2+pad2*2+4, ly2), color, -1)
-                cv2.addWeighted(pill, 0.28, display, 0.72, 0, display)
-                cv2.rectangle(display, (lx1, ly2-2), (lx1+tw2+pad2*2+4, ly2), color, -1)
-                cv2.putText(display, txt, (lx1+pad2+2, ly2-pad2-1),
-                            font, fs, (255,255,255), tt, cv2.LINE_AA)
-
-            # ── HUD overlay ─────────────────────────────────────────────────
-            display = draw_live_hud(display, last_counts, frame_idx)
-
-            # High quality encode
-            _, buf = cv2.imencode(".jpg", display, [cv2.IMWRITE_JPEG_QUALITY, 88])
-            yield (
-                b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
-                + buf.tobytes() + b"\r\n"
-            )
+            _, buf = cv2.imencode(".jpg", display, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n")
             frame_idx += 1
 
     finally:
