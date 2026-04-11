@@ -1,13 +1,7 @@
 <div align="center">
 
-```
-██╗   ██╗██╗███████╗██╗ ██████╗ ███╗   ██╗    ██████╗ ██████╗  ██████╗
-██║   ██║██║██╔════╝██║██╔═══██╗████╗  ██║    ██╔══██╗██╔══██╗██╔═══██╗
-██║   ██║██║███████╗██║██║   ██║██╔██╗ ██║    ██████╔╝██████╔╝██║   ██║
-╚██╗ ██╔╝██║╚════██║██║██║   ██║██║╚██╗██║    ██╔═══╝ ██╔══██╗██║   ██║
- ╚████╔╝ ██║███████║██║╚██████╔╝██║ ╚████║    ██║     ██║  ██║╚██████╔╝
-  ╚═══╝  ╚═╝╚══════╝╚═╝ ╚═════╝ ╚═╝  ╚═══╝    ╚═╝     ╚═╝  ╚═╝ ╚═════╝
-```
+
+<img src="https://readme-typing-svg.demolab.com?font=Fira+Code&size=40&duration=1&pause=10000&color=FFFFFF&background=0D1117&center=true&vCenter=true&multiline=true&repeat=false&width=700&height=120&lines=VisionPro" alt="VisionPro" />
 
 **Real-Time Object Detection · High Accuracy · Minimal Latency**
 
