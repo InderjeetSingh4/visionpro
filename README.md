@@ -174,7 +174,7 @@ Input Source         Preprocessing        Model Inference      Post-processing
 *B.Tech — Artificial Intelligence & Data Science*
 
 [![Portfolio](https://img.shields.io/badge/Portfolio-inderjeet.online-000000?style=for-the-badge&logo=safari&logoColor=white)](https://inderjeet.online)
-[![GitHub](https://img.shields.io/badge/GitHub-@yourusername-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/yourusername)
+[![GitHub](https://img.shields.io/badge/GitHub-@yourusername-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/InderjeetSingh4)
 
 </div>
 
